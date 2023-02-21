@@ -51,12 +51,19 @@ def get_axie_list(userid: str, number_of_games: int = 1):
     }
     r = requests.get(url, headers=headers, params=params)
     battles = json.loads(r.text)['battles']
+    battles_match_ids, battle_genes = dict(), dict()
     for battle in battles:
         if battle['client_ids'][0] == userid:
             axie_team = battle['first_client_fighters']
         else:
             axie_team = battle['second_client_fighters']
-    axie_info = [(axie['axie_id'], axie['gene']) for axie in axie_team]  # Just take last battle to explore
+        for axie in axie_team:
+            battles_match_ids[axie['axie_id']] = battles_match_ids.get(axie['axie_id'], 0) + 1
+            battle_genes[axie['axie_id']] = battle_genes.get(axie['axie_id'], axie['gene'])
+        top_ids = dict(sorted(battles_match_ids.items(), key=lambda x: x[1], reverse=True)[0:3]).keys()
+
+    # axie_info = [(axie['axie_id'], axie['gene']) for axie in axie_team]  # Just take last battle to explore
+    axie_info = [(axie_id, str(battle_genes[axie_id])) for axie_id in top_ids]
     logging.debug(f'axie_info: {axie_info}')
     return axie_info
 
@@ -114,6 +121,7 @@ def get_similar_axies(axie_detail):
         return None
     similar_axies_raw = json.loads(r.text)
     if similar_axies_raw['data']['axies']['total'] == 0:
+        logging.debug(f"No twin axies acessible on marketplace for id: {axie_detail.get('id', 'ID not given.')}")
         return None
     else:
         return similar_axies_raw['data']['axies']['results']
@@ -184,14 +192,42 @@ def select_n_cheapest_teams(teams, rank_limit: list = [1, 10000]):
     # teams = teams[teams['rank'] > rank_limit[0] and teams['rank'] <= rank_limit[1]]
     return teams[(teams['rank'] > rank_limit[0]) and (teams['rank'] <= rank_limit[1])].sort_values(by=['price', 'rank'])
 
+def find_similar_axie_by_id(axie_id):
+    """ Get twin axie ids from marketplace by ID
+
+    :param axie_id: axie_id
+    :return: list of ids
+    """
+    axie_info = [axie_id, retrieve_gen_by_id(axie_id)]  # receive gen by id
+    axie_parts = retrieve_data_from_gene(axie_info)  # receive parts by gen
+    twin_axies = get_similar_axies(axie_parts)  #
+    return [twin_axie['id'] for twin_axie['id'] in twin_axies]
+
+def retrieve_gen_by_id(axie_id):
+    query = {
+        "operationName": "GetAxieDetail",
+        "variables": {
+            "axieId": axie_id
+        },
+        "query": "query GetAxieDetail($axieId: ID!) {\n  axie(axieId: $axieId) {\n    ...AxieDetail\n    __typename\n  }\n}\n\nfragment AxieDetail on Axie {\n  id\n  image\n  class\n  chain\n  name\n  genes\n  owner\n  birthDate\n  bodyShape\n  class\n  sireId\n  sireClass\n  matronId\n  matronClass\n  stage\n  title\n  breedCount\n  level\n  figure {\n    atlas\n    model\n    image\n    __typename\n  }\n  parts {\n    ...AxiePart\n    __typename\n  }\n  stats {\n    ...AxieStats\n    __typename\n  }\n  auction {\n    ...AxieAuction\n    __typename\n  }\n  ownerProfile {\n    name\n    __typename\n  }\n  battleInfo {\n    ...AxieBattleInfo\n    __typename\n  }\n  children {\n    id\n    name\n    class\n    image\n    title\n    stage\n    __typename\n  }\n  __typename\n}\n\nfragment AxieBattleInfo on AxieBattleInfo {\n  banned\n  banUntil\n  level\n  __typename\n}\n\nfragment AxiePart on AxiePart {\n  id\n  name\n  class\n  type\n  specialGenes\n  stage\n  abilities {\n    ...AxieCardAbility\n    __typename\n  }\n  __typename\n}\n\nfragment AxieCardAbility on AxieCardAbility {\n  id\n  name\n  attack\n  defense\n  energy\n  description\n  backgroundUrl\n  effectIconUrl\n  __typename\n}\n\nfragment AxieStats on AxieStats {\n  hp\n  speed\n  skill\n  morale\n  __typename\n}\n\nfragment AxieAuction on Auction {\n  startingPrice\n  endingPrice\n  startingTimestamp\n  endingTimestamp\n  duration\n  timeLeft\n  currentPrice\n  currentPriceUSD\n  suggestedPrice\n  seller\n  listingIndex\n  state\n  __typename\n}\n"
+    }
+
+    r = requests.post(url=marketplace_endpoint,
+                      json=query,
+                      headers={'content-type': 'application/json'})
+    if r.status_code != 200:
+        logging.info(f'get_similar_axies_by_id: status_code: {r.status_code}')
+        return None
+    axie_gene = json.loads(r.text)['data']['axie']['newGenes']
+    return axie_gene
 if __name__ == '__main__':
-    f_r = 0
-    n_p = 2000
+    f_r = 1500
+    n_p = 1700
     teams_df = pd.DataFrame(columns=['rank', 'id_1', 'id_2', 'id_3', 'price'])
     for place in range(f_r, n_p, 100):
         user_ids = get_leaderboard(first_rank=place, number_of_places=100)
         teams_banch = get_cheapest_teams(user_ids)
         teams_df = pd.concat([teams_df, teams_banch], ignore_index=True)
-    print(teams_df.sort_value(by='price').head())
+    print(teams_df.sort_values(by='price').head())
 
 
