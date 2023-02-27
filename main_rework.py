@@ -1,4 +1,4 @@
-import credentials
+import cProfile, pstats
 import pandas as pd
 import requests
 import json
@@ -133,7 +133,7 @@ class AxieUser:
             "accept": "application/json",
             "X-API-Key": api_token
         }
-        for batch_of_places in range(offset, number_of_places + 1, request_capacity):
+        for batch_of_places in range(offset, offset + number_of_places, request_capacity):
             params = {
                 'limit': request_capacity,
                 'offset': batch_of_places
@@ -186,13 +186,16 @@ class AxieUser:
 
 
     @staticmethod
-    def get_leaderboard_team_prices(log_output: bool = False):
+    def get_leaderboard_team_prices(number_of_places: int = 100,
+                                    offset: int = 1,
+                                    request_capacity: int = None,
+                                    log_output: bool = False):
         """ Return prices of teams (where twins exist) in a leaderboard
 
         :param log_output: True if write output in logfile INFO level
         :return: list of dicts {rank, [axie_ids], price}
         """
-        leaderboard = AxieUser.get_leaderboard()
+        leaderboard = AxieUser.get_leaderboard(number_of_places, offset, request_capacity)
         leader_prices = list()
         for rank, user_id in leaderboard:
             user = AxieUser(user_id, axie_ids=[])
@@ -324,5 +327,11 @@ class Axie:
 # ax.update()
 # ids = [1639675, 3846958, 7299965]
 # us = AxieUser(sample_user_id)
-out = AxieUser.get_leaderboard_team_prices(log_output=True)
-a = 6
+profile = cProfile.Profile()
+profile.runcall(AxieUser.get_leaderboard_team_prices,
+                number_of_places = 2,
+                offset = 1000)
+ps = pstats.Stats(profile)
+ps.sort_stats("percall").print_stats("main_rework.py")
+# out = AxieUser.get_leaderboard_team_prices(log_output=True)
+# a = 6
