@@ -7,10 +7,11 @@ from credentials import api_token, sample_user_id
 import logging
 from agp_py import AxieGene
 import tools
+from collections import Counter
 
 pd.options.mode.chained_assignment = None
 logging.basicConfig(level=logging.INFO, filename='logs_rework.log', format='%(asctime)s :: %(levelname)s :: %(message)s')
-tools.erase_log()
+# tools.erase_log()
 marketplace_endpoint = 'https://graphql-gateway.axieinfinity.com/graphql/'
 parts = ['eyes', 'mouth', 'ears', 'horn', 'back', 'tail']
 
@@ -44,12 +45,9 @@ class AxieUser:
             if r.status_code != 200:
                 logging.info(f"get_axies status_code: {r.status_code} || user_id :{self.user_id}")
                 return None
-            return [axie['id'] for axie in json.loads(r.text)['_items']]
         except requests.exceptions.RequestException as error:
-            if logging.root.level <= logging.INFO:
-                logging.info(f"Gen can't be accessed due to: {error}.")
-            else:
-                print(f"Gen can't be accessed due to: {error}.")
+                logging.info(f"User id: {self.user_id} Axies can't be accessed due to: {error}.")
+        return [axie['id'] for axie in json.loads(r.text)['_items']]
 
     def get_axies(self, axie_ids: list = None):
         """ Get Axies from axie ids.
@@ -59,31 +57,32 @@ class AxieUser:
         """
         if axie_ids is None:
             return [Axie(axie_id) for axie_id in self.get_axie_ids()]
-        elif len(axie_ids) == 0:
+        elif len(axie_ids) == 0:  # In case of no need of axies
             return None
         else:
             return [Axie(axie_id) for axie_id in axie_ids]
 
 
-    def get_min_axie_prices(self, axies: list = None) -> pd.DataFrame:
+    def get_min_axie_prices(self, axies: list = None):
         """ Get minimum market praces for twin axies
+
         :param axies: list of axies for price check
-        :return: pandas DataFrame {id, id_twin, price} for all axies
+        :return: list of dicts {id, id_twin, price} for player axies
         """
         if axies == None:
             axies = self.axies
         out = list()
         for axie in axies:
-            cheapest = axie.get_twins(get_cheapest=True)
-            if cheapest:
+            twin = axie.get_twins(size=1)
+            if twin:
                 out.append({'id': axie.axie_id,
-                            'id_twin': cheapest['id'],
-                            'price': cheapest['price']})
+                            'id_twin': twin['id'],
+                            'price': float(twin['price'])})
             else:
                 out.append({'id': axie.axie_id,
                             'id_twin': None,
                             'price': None})
-        return pd.DataFrame(out)
+        return out
 
     def get_battle_history(self, number_of_games: int = 5):
         """ Get list of recent player games
@@ -106,10 +105,7 @@ class AxieUser:
             if r.status_code != 200:
                 logging.info(f"Getting list of battle, error: {r.status_code}")
         except requests.exceptions.RequestException as error:
-            if logging.root.level <= logging.INFO:
-                logging.info(f"Gen can't be accessed due to: {error}.")
-            else:
-                print(f"Gen can't be accessed due to: {error}.")
+                logging.info(f"User id: {self.user_id}. Battles can't be accessed due to: {error}.")
         self.battles = json.loads(r.text)['battles']
         return self.battles
 
@@ -144,11 +140,9 @@ class AxieUser:
                     logging.info(f"Get leaderboard error: {r.status_code}")
                     return None
             except requests.exceptions.RequestException as error:
-                if logging.root.level <= logging.INFO:
-                    logging.info(f"Leaderboard can't be accessed due to: {error}.")
-                else:
-                    print(f"Leaderboard can't be accessed due to: {error}.")
+                logging.info(f"Leaderboard can't be accessed due to: {error}.")
                 return None
+
             leaders.extend([(leader['topRank'], leader['userID']) for leader in json.loads(r.text)['_items']])
         return leaders
 
@@ -159,16 +153,21 @@ class AxieUser:
         :param user_id: player id
         :return: list of Axie instances of an active team for user_id
         """
-        self.get_battle_history(number_of_games=5)
-        battles_match_ids = {}
+        battles_match_ids = Counter()
         for battle in self.battles:
             if battle['client_ids'][0] == self.user_id:  # Decide first team or second team
                 axie_team = battle['first_client_fighters']
             else:
                 axie_team = battle['second_client_fighters']
             for axie in axie_team:  # If 2 teams used in last number_of_games, find with most playable axies.
-                battles_match_ids[axie['axie_id']] = battles_match_ids.get(axie['axie_id'], 0) + 1
-        self.active_team = [Axie(i[0]) for i in sorted(battles_match_ids.items(), key=lambda x: x[1], reverse=True)[0:3]]
+                battles_match_ids[axie['axie_id']] += 1
+        if len(battles_match_ids) == 3:
+            self.active_team = [Axie(axie_id) for axie_id in battles_match_ids.keys()]
+        else:
+            self.active_team = [Axie(ax_id[0]) for ax_id in battles_match_ids.most_common(3)]
+
+        # self.active_team = [Axie(i[0]) for i in sorted(battles_match_ids.items(), key=lambda x: x[1], reverse=True)[0:3]]
+
         return self.active_team  # Get most popular
 
 
@@ -178,11 +177,13 @@ class AxieUser:
 
         :return: {price, axie_ids}
         """
-        self.get_active_team()
-        df = self.get_min_axie_prices(axies=self.active_team)
-        if df.isnull().values.any():
+        team_info = self.get_min_axie_prices(axies=self.active_team)
+        if any(data['price'] is None for data in team_info):  # Check if there is a None value (no twin axie)
             return None
-        return {'price': df['price'].astype(float).sum(), 'axie_ids': df['id_twin'].values.tolist()}
+        return {'price': round(sum([axie['price'] for axie in team_info], 2)),
+                'twin_id1': team_info[0]['id_twin'],
+                'twin_id2': team_info[1]['id_twin'],
+                'twin_id3': team_info[2]['id_twin']}
 
 
     @staticmethod
@@ -199,16 +200,20 @@ class AxieUser:
         leader_prices = list()
         for rank, user_id in leaderboard:
             user = AxieUser(user_id, axie_ids=[])
+            user.leaderboard_update()
             team_info = user.get_team_price()
             if team_info is None:
                 continue
             if log_output:
-                logging.info('Team_rank: {} :: axie_ids: {}|{}|{} :: Price: {:.2f}'
-                             .format(rank, team_info['axie_ids'][0], team_info['axie_ids'][1],
-                                     team_info['axie_ids'][2], team_info['price']))
+                logging.info(f"Team_rank: {rank} :: axie_ids:"
+                             f" {team_info['twin_id1']}|{team_info['twin_id2']}|{team_info['twin_id3']} "
+                             f":: Price: {team_info['price']}")
             leader_prices.append({'rank': rank, **team_info})
         return leader_prices
 
+    def leaderboard_update(self):
+        self.get_battle_history()
+        self.get_active_team()
 
 
 
@@ -249,11 +254,7 @@ class Axie:
             else:
                 return json.loads(r.text)['data']['axie']['newGenes']
         except requests.exceptions.RequestException as error:
-            if logging.root.level <= logging.INFO:
-                logging.info(f"Gen can't be accessed due to: {error}.")
-            else:
-                print(f"Gen can't be accessed due to: {error}.")
-
+                logging.info(f"Axie id: {self.axie_id}. Gen can't be accessed due to: {error}.")
 
     def retrieve_parts_from_genes(self):
         """ Retrieves information from gene string.
@@ -268,11 +269,10 @@ class Axie:
             return None, None
         return gene.genes['cls'].capitalize(), {part: gene.genes[part]['d']['partId'] for part in parts}
 
-    def get_twins(self, size: int = 2, get_cheapest: bool = False):
+    def get_twins(self, size: int = 2):
         """Get twin axies
 
             :param size: number of marketplace twins return.
-            :param get_cheapest bool True for return {id, price} of cheapest twin
             :return: pandas Dataframe with twin axies {id, price, link}
             """
 
@@ -301,24 +301,33 @@ class Axie:
             if similar_axies_raw['total'] == 0:
                 logging.debug(f"No twin axies acessible on marketplace for id: {self.axie_id}")
                 return None
-            if get_cheapest:
-                return {'id': similar_axies_raw['results'][0]['id'],
-                        'price': similar_axies_raw['results'][0]['order']['currentPriceUsd']}
-            self.twins = pd.DataFrame([{'id': axie['id'],
-                                        'price': axie['order']['currentPriceUsd'],
-                                        'link': f"https://app.axieinfinity.com/marketplace/axies/{axie['id']}/"}
-                                         for axie in similar_axies_raw['results']])
-            return self.twins
         except requests.exceptions.RequestException as error:
-            if logging.root.level <= logging.info:
-                logging.info(f"Gen can't be accessed due to: {error}.")
-            else:
-                print(f"Gen can't be accessed due to: {error}.")
+            logging.info(f"Axie id: {self.axie_id} Twins can't be accessed due to: {error}.")
+
+        self.twins = [{'id': axie['id'], 'price': axie['order']['currentPriceUsd']}
+                      for axie in similar_axies_raw['results']]
+        if size == 1:
+            return self.twins[0]
+
     def update(self):
-        self.__init__(axie_id=self.axie_id)
+        self.__init__(axie_id=self.axie_id)  # Should be reworked.
 
 
+class AxieReturnHandler():
 
+    def __init__(self, axie_user: AxieUser = None, axie: Axie = None):
+        self.axie_user = axie_user
+        self.axie = axie
+        pass
+
+def cprofile_test():
+    profile = cProfile.Profile()
+    profile.runcall(AxieUser.get_leaderboard_team_prices,
+                    number_of_places=20,
+                    offset=1000,
+                    log_output=True)
+    ps = pstats.Stats(profile)
+    ps.sort_stats("cumtime").print_stats("main_rework.py")
 
 
 
@@ -327,11 +336,6 @@ class Axie:
 # ax.update()
 # ids = [1639675, 3846958, 7299965]
 # us = AxieUser(sample_user_id)
-profile = cProfile.Profile()
-profile.runcall(AxieUser.get_leaderboard_team_prices,
-                number_of_places = 2,
-                offset = 1000)
-ps = pstats.Stats(profile)
-ps.sort_stats("percall").print_stats("main_rework.py")
+cprofile_test()
 # out = AxieUser.get_leaderboard_team_prices(log_output=True)
 # a = 6
